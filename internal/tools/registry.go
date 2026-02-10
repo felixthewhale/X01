@@ -3,9 +3,11 @@ package tools
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -328,23 +330,205 @@ func CheckMessages(ctx context.Context, args map[string]interface{}) string {
 	return sb.String()
 }
 
-func GetToolRegistry() map[string]core.ToolFunc {
-	return map[string]core.ToolFunc{
-		"ask_user":      AskUser,
-		"docker_shell":  DockerShell,
-		"think":         Think,
-		"memorize":      Memorize,
-		"forget_memory": ForgetMemory,
-		"update_state":  UpdateState,
-		"replace_state": ReplaceState,
-		"search_history": SearchHistory,
-		"check_messages": CheckMessages,
-		"sleep":          Sleep,
+// Addon represents a dynamically loaded custom tool
+type Addon struct {
+	Name       string
+	Schema     interface{}
+	ScriptPath string
+}
+
+var loadedAddons []Addon
+
+// LoadAddons scans sandbox/addons/ for Python tools
+func LoadAddons() {
+	loadedAddons = []Addon{}
+	addonsRoot := "sandbox/addons"
+
+	// Ensure addons directory exists
+	if _, err := os.Stat(addonsRoot); os.IsNotExist(err) {
+		logger.LogInfo("Creating addons directory: %s", addonsRoot)
+		os.MkdirAll(addonsRoot, 0755)
+		return
+	}
+
+	entries, err := os.ReadDir(addonsRoot)
+	if err != nil {
+		logger.LogError("Failed to read addons directory: %v", err)
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".py") {
+			continue
+		}
+
+		toolPath := filepath.Join(addonsRoot, entry.Name())
+
+		// Parse tool metadata from Python file
+		metadata, err := LoadPythonTool(toolPath)
+		if err != nil {
+			logger.LogWarning("Failed to load tool %s: %v", entry.Name(), err)
+			continue
+		}
+
+		// Build OpenAI function schema
+		schema := map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        metadata.Name,
+				"description": metadata.Description,
+				"parameters":  metadata.Parameters,
+			},
+		}
+
+		loadedAddons = append(loadedAddons, Addon{
+			Name:       metadata.Name,
+			Schema:     schema,
+			ScriptPath: toolPath,
+		})
+		logger.LogSuccess("Loaded dynamic addon: %s (%s)", metadata.Name, entry.Name())
 	}
 }
 
+// createAddonRunner creates a function that executes a Python addon in Docker
+func createAddonRunner(addon Addon) core.ToolFunc {
+	return func(ctx context.Context, args map[string]interface{}) string {
+		logger.LogTool(addon.Name, "Executing addon in Docker: %s", addon.ScriptPath)
+
+		// Ensure container is running
+		if err := ensureContainer("python:3.10-slim"); err != nil {
+			return fmt.Sprintf("Error: Failed to start sandbox: %v", err)
+		}
+
+		argData, _ := json.Marshal(args)
+
+		// Execute in Docker - path is relative to /workspace
+		// sandbox/addons/tool.py -> /workspace/addons/tool.py
+		dockerPath := strings.Replace(addon.ScriptPath, "sandbox/", "/workspace/", 1)
+		dockerPath = strings.Replace(dockerPath, "\\", "/", -1)
+
+		cmd := exec.CommandContext(ctx, "docker", "exec", "-i", ContainerName, "python3", dockerPath)
+		cmd.Stdin = strings.NewReader(string(argData))
+		out, err := cmd.CombinedOutput()
+
+		if err != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				return "Error: Addon timed out"
+			}
+			return fmt.Sprintf("Error: %v\nOutput: %s", err, string(out))
+		}
+
+		return string(out)
+	}
+}
+
+// DefineTool creates a new custom tool at runtime
+func DefineTool(ctx context.Context, args map[string]interface{}) string {
+	name, _ := args["name"].(string)
+	description, _ := args["description"].(string)
+	code, _ := args["code"].(string)
+
+	if name == "" || code == "" {
+		return "Error: 'name' and 'code' are required"
+	}
+
+	// Parse parameters (optional)
+	parameters := map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
+	if params, ok := args["parameters"].(map[string]interface{}); ok {
+		parameters = params
+	}
+
+	// Build Python tool file
+	paramsJSON, _ := json.MarshalIndent(parameters, "", "    ")
+	toolContent := fmt.Sprintf(`#!/usr/bin/env python3
+"""
+TOOL_NAME: %s
+DESCRIPTION: %s
+PARAMETERS: %s
+"""
+
+import sys
+import json
+
+def execute(args):
+    """Main entry point for the tool."""
+%s
+
+if __name__ == "__main__":
+    # Read args from stdin
+    input_data = sys.stdin.read()
+    args = json.loads(input_data) if input_data else {}
+    
+    # Execute and print result
+    result = execute(args)
+    print(result)
+`, name, description, string(paramsJSON), indentCode(code, "    "))
+
+	// Ensure addons directory exists
+	os.MkdirAll("sandbox/addons", 0755)
+
+	// Write to sandbox/addons/name.py
+	toolPath := filepath.Join("sandbox/addons", name+".py")
+	if err := os.WriteFile(toolPath, []byte(toolContent), 0644); err != nil {
+		return fmt.Sprintf("Error writing tool file: %v", err)
+	}
+
+	// Auto-reload
+	LoadAddons()
+
+	logger.LogSuccess("Tool '%s' created and registered at %s", name, toolPath)
+	return fmt.Sprintf("Tool '%s' created successfully! It's now available for use.", name)
+}
+
+// Helper to indent code blocks
+func indentCode(code string, indent string) string {
+	lines := strings.Split(code, "\n")
+	var indented []string
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			indented = append(indented, indent+line)
+		} else {
+			indented = append(indented, "")
+		}
+	}
+	return strings.Join(indented, "\n")
+}
+
+//ReloadAddons refreshes loaded addons from disk
+func ReloadAddons(ctx context.Context, args map[string]interface{}) string {
+	LoadAddons()
+	return "Addons reloaded successfully. Your tool schema has been updated."
+}
+
+func GetToolRegistry() map[string]core.ToolFunc {
+	registry := map[string]core.ToolFunc{
+		"ask_user":       AskUser,
+		"docker_shell":   DockerShell,
+		"think":          Think,
+		"memorize":       Memorize,
+		"forget_memory":  ForgetMemory,
+		"update_state":   UpdateState,
+		"replace_state":  ReplaceState,
+		"search_history": SearchHistory,
+		"check_messages": CheckMessages,
+		"sleep":          Sleep,
+		"reload_addons":  ReloadAddons,
+		"define_tool":    DefineTool,
+	}
+
+	// Register dynamic addons
+	for _, addon := range loadedAddons {
+		registry[addon.Name] = createAddonRunner(addon)
+	}
+
+	return registry
+}
+
 func GetToolSchemas() []interface{} {
-	return []interface{}{
+	schemas := []interface{}{
 		map[string]interface{}{
 			"type": "function",
 			"function": map[string]interface{}{
@@ -542,5 +726,53 @@ func GetToolSchemas() []interface{} {
 				},
 			},
 		},
+		map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "reload_addons",
+				"description": "Scans the addons folder and updates the agent's available tools without restarting.",
+				"parameters": map[string]interface{}{
+					"type":       "object",
+					"properties": map[string]interface{}{},
+				},
+			},
+		},
+		map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "define_tool",
+				"description": "Create a new custom tool dynamically at runtime that will be immediately available.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"name": map[string]interface{}{
+							"type":        "string",
+							"description": "Tool name in snake_case",
+						},
+						"description": map[string]interface{}{
+							"type":        "string",
+							"description": "What the tool does",
+						},
+						"parameters": map[string]interface{}{
+							"type":        "object",
+							"description": "OpenAI function parameter schema (optional)",
+						},
+						"code": map[string]interface{}{
+							"type":        "string",
+							"description": "Python code for the execute(args) function body",
+						},
+					},
+					"required": []string{"name", "description", "code"},
+				},
+			},
+		},
 	}
+
+	// Register dynamic addon schemas
+	for _, addon := range loadedAddons {
+		schemas = append(schemas, addon.Schema)
+	}
+
+	return schemas
 }
+

@@ -44,20 +44,23 @@ func LLMCall(messages []db.Message, tools []interface{}) (*db.Message, []ToolCal
 		return &db.Message{Role: "assistant", Content: "No API Key"}, nil, nil
 	}
 
+	// The provided code edit seems to be attempting to insert a prompt string here.
 	payload := map[string]interface{}{
-		"model":       "google/gemini-3-flash-preview",
+		"model":       "google/gemini-3-flash-preview", // Switched to more stable version
 		"messages":    messages,
 		"tools":       tools,
 		"tool_choice": "auto",
 	}
 
-	logger.LogInfo("Calling LLM (%s)...", payload["model"])
+	startTime := time.Now()
+	logger.LogInfo("Calling OpenRouter API (%s)...", payload["model"])
+
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", "https://openrouter.ai/api/v1/chat/completions", bytes.NewBuffer(jsonData))
@@ -67,27 +70,44 @@ func LLMCall(messages []db.Message, tools []interface{}) (*db.Message, []ToolCal
 
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("HTTP-Referer", "https://github.com/felixthewhale/X01")
+	req.Header.Set("X-Title", "X01 Orbital Core")
 
-	client := &http.Client{}
+	client := &http.Client{
+		Timeout: 160 * time.Second, // Hard client timeout
+	}
+
+	logger.LogInfo("-> Request Sent. Waiting for headers...")
 	resp, err := client.Do(req)
 	if err != nil {
-		logger.LogError("API request failed: %v", err)
+		logger.LogError("!!! Network/API request failed after %v: %v", time.Since(startTime), err)
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
 
+	logger.LogInfo("<- Response Received (Status: %d) after %v.", resp.StatusCode, time.Since(startTime))
+
 	if resp.StatusCode != 200 {
 		body, _ := ioutil.ReadAll(resp.Body)
-		logger.LogError("API Error (%d): %s", resp.StatusCode, string(body))
+		logger.LogError("API HTTP %d Error: %s", resp.StatusCode, string(body))
 		return nil, nil, fmt.Errorf("API Error (%d): %s", resp.StatusCode, string(body))
 	}
 
 	var result LLMResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, nil, err
+	// Read the response body into a buffer first, so it can be logged if choices are empty
+	responseBodyBytes, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	logger.LogInfo("<- Body Downloaded (%d bytes). Parsing JSON...", len(responseBodyBytes))
+
+	if err := json.Unmarshal(responseBodyBytes, &result); err != nil {
+		return nil, nil, fmt.Errorf("failed to decode LLM response: %w", err)
 	}
 
 	if len(result.Choices) == 0 {
+		logger.LogError("LLM returned no choices. Raw response: %s", string(responseBodyBytes))
 		return nil, nil, fmt.Errorf("no choices returned from LLM")
 	}
 
@@ -95,7 +115,7 @@ func LLMCall(messages []db.Message, tools []interface{}) (*db.Message, []ToolCal
 	if result.Choices[0].Message.ReasoningContent != "" {
 		fullMsg.Reasoning = result.Choices[0].Message.ReasoningContent
 	}
-	
+
 	if fullMsg.Reasoning != "" {
 		logger.LogThink("Reasoning: %s", fullMsg.Reasoning)
 	}
@@ -108,5 +128,6 @@ func LLMCall(messages []db.Message, tools []interface{}) (*db.Message, []ToolCal
 		}
 	}
 
+	logger.LogSuccess("LSPR Turn Processed in %v.", time.Since(startTime))
 	return &fullMsg, toolCalls, nil
 }

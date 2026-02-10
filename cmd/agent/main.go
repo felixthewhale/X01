@@ -83,6 +83,9 @@ func main() {
 	}
 	logger.LogSuccess("System state initialized.")
 
+	// Load dynamic addons
+	tools.LoadAddons()
+
 	// 2. Loop
 	registry := tools.GetToolRegistry()
 	schemas := tools.GetToolSchemas()
@@ -130,53 +133,52 @@ func main() {
 }
 
 func runHeartbeat(registry map[string]core.ToolFunc, schemas []interface{}) error {
-	// Fetch State and Memories
+	// 1. Fetch State and Memories
 	stateText, _ := db.GetState("prime_context")
 	memories, err := db.GetMemories(20)
 	if err != nil {
 		logger.LogError("Failed to fetch memories: %v", err)
 	}
 
-	// 3. Prepare Prompt
+	// 2. Prepare System Prompt
 	server.SetActivity("Synthesizing context & history...")
 	sysMsg := prompt.RenderPrompt(stateText, memories, 3.0)
 	
-	// Get History from DB
+	// 3. Get History from DB
 	history, err := db.GetHistory(20)
 	if err != nil {
 		return fmt.Errorf("failed to get history: %v", err)
 	}
 
-	// We no longer need the manual pruning here because transactions ensure the DB is always clean.
-	// But as a safety measure for existing corrupted DBs, we'll keep a simpler check once.
-	if len(history) > 0 {
-		lastMsg := history[len(history)-1]
-		if lastMsg.Role == "assistant" && len(lastMsg.ToolCalls) > 0 {
-			logger.LogInfo("Cleaning up legacy dangling tool call for transaction safety.")
-			history = history[:len(history)-1]
-		}
-	}
-
+	// 4. Prepare Context
 	messages := []db.Message{
 		{Role: "system", Content: sysMsg},
 	}
 	messages = append(messages, history...)
 	
-	pulse := fmt.Sprintf("HEARTBEAT PULSE:\n{\"time\": %d}\n\nThis is an automated heartbeat pulse. Continue your cycle.", time.Now().Unix())
-	pulseMsg := db.Message{Role: "user", Content: pulse}
-	messages = append(messages, pulseMsg)
-
-	// Save the Pulse immediately as a baseline
-	if err := db.SaveMessages([]db.Message{pulseMsg}); err != nil {
-		logger.LogError("Failed to save initial heartbeat pulse: %v", err)
+	// 5. Handle Pulse Strategy
+	// Gemini rejects consecutive human/user messages. If history ends in a user turn, skip redundancy.
+	hasRecentUser := false
+	if len(history) > 0 && history[len(history)-1].Role == "user" {
+		hasRecentUser = true
 	}
 
-	// currentTurns will now only track messages added DURING this loop for context,
-	// but we will save them in groups to ensure sequence validity.
-	currentTurns := []db.Message{}
+	pulse := fmt.Sprintf("HEARTBEAT PULSE:\n{\"time\": %d}\n\nThis is an automated heartbeat pulse. Continue your cycle.", time.Now().Unix())
+	pulseMsg := db.Message{Role: "user", Content: pulse}
+	
+	if !hasRecentUser {
+		messages = append(messages, pulseMsg)
+	} else {
+		logger.LogInfo("Suppressing redundant heartbeat (history already ends with user activity).")
+	}
+	
+	pulseSaved := hasRecentUser // If it's already in history, it's "saved"
 
+	// 6. Execution Loop (LSPR)
+	currentTurns := []db.Message{}
 	maxTurns := 10
 	logger.LogInfo("Starting LSPR cycle (max %d turns)...", maxTurns)
+	
 	for turn := 0; turn < maxTurns; turn++ {
 		logger.LogInfo("--- Turn %d/%d ---", turn+1, maxTurns)
 		server.SetActivity(fmt.Sprintf("Core Processing: Turn %d", turn+1))
@@ -188,16 +190,26 @@ func runHeartbeat(registry map[string]core.ToolFunc, schemas []interface{}) erro
 		}
 
 		// Buffer for messages in THIS specific turn
-		thisTurnMsgs := []db.Message{*msg}
+		thisTurnMsgs := []db.Message{}
+		
+		// Conditionally persist the pulse ONLY if the agent acts and it wasn't already in history
+		if (msg.Content != "" || len(toolCalls) > 0) && !pulseSaved {
+			thisTurnMsgs = append(thisTurnMsgs, pulseMsg)
+			pulseSaved = true
+		}
+		
+		thisTurnMsgs = append(thisTurnMsgs, *msg)
 		currentTurns = append(currentTurns, *msg)
 
 		if len(toolCalls) == 0 {
 			if msg.Content != "" {
 				logger.LogAgent("%s", msg.Content)
 			}
-			// Save the final assistant response of the turn
-			if err := db.SaveMessages(thisTurnMsgs); err != nil {
-				logger.LogError("Failed to save final turn message: %v", err)
+			// Save the final results of the cycle
+			if len(thisTurnMsgs) > 0 {
+				if err := db.SaveMessages(thisTurnMsgs); err != nil {
+					logger.LogError("Failed to save final turn message: %v", err)
+				}
 			}
 			break
 		}
@@ -206,7 +218,6 @@ func runHeartbeat(registry map[string]core.ToolFunc, schemas []interface{}) erro
 			logger.LogInfo("Tool Call: %s", call.Function.Name)
 
 			var result string
-			// ... (tool execution logic) ...
 			if fn, ok := registry[call.Function.Name]; ok {
 				var args map[string]interface{}
 				json.Unmarshal([]byte(call.Function.Arguments), &args)
@@ -216,6 +227,23 @@ func runHeartbeat(registry map[string]core.ToolFunc, schemas []interface{}) erro
 					timeout = t
 				} else if t, ok := args["timeout"].(float64); ok {
 					timeout = int(t)
+				}
+
+				// Special handling for long-running tools
+				if call.Function.Name == "sleep" {
+					if s, ok := args["seconds"].(float64); ok {
+						if int(s)+5 > timeout {
+							timeout = int(s) + 5
+						}
+					} else if s, ok := args["seconds"].(int); ok {
+						if s+5 > timeout {
+							timeout = s + 5
+						}
+					}
+				} else if call.Function.Name == "ask_user" {
+					if timeout < 600 {
+						timeout = 600
+					}
 				}
 				
 				server.SetActivity(fmt.Sprintf("Tool Engagement: %s", call.Function.Name))
@@ -236,9 +264,11 @@ func runHeartbeat(registry map[string]core.ToolFunc, schemas []interface{}) erro
 		}
 
 		// ATOMIC COMMIT for this specific turn segment (Assistant + Tools)
-		logger.LogInfo("Attempting to persist turn %d results...", turn+1)
-		if err := db.SaveMessages(thisTurnMsgs); err != nil {
-			logger.LogError("Failed to save turn messages incrementally: %v", err)
+		if len(thisTurnMsgs) > 0 {
+			logger.LogInfo("Attempting to persist turn %d results...", turn+1)
+			if err := db.SaveMessages(thisTurnMsgs); err != nil {
+				logger.LogError("Failed to save turn messages incrementally: %v", err)
+			}
 		}
 	}
 
