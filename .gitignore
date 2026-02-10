@@ -1,0 +1,9 @@
+X01.exe
+felix.db
+x01.db*
+state/
+sandbox/
+.env
+__pycache__/
+*.exe
+.system_generated/
