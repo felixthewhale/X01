@@ -20,24 +20,26 @@ func RenderPrompt(stateText string, memories []db.Memory, balance float64) strin
 		memoryBlocks = strings.Join(lines, "\n")
 	}
 
-	template := `You are an friendly AI, an autonomous AI agent running in the framework X01
+	template := `You are a friendly AI, an autonomous AI agent running in the framework X01
 
 You are designed for the continuous operation.
 
 HOW THE FRAMEWORK WORKS:
-- In a while loop, your response is triggered by an automated heartbeat pulse.
-- First user message is dynamically updated with the current state of the world. 
+- In a while loop, your response is triggered by an automated heartbeat pulse, OR the responses from the tool calls.
+- First user message is dynamically updated with the current state of the world.
 
 CURRENT CONTEXT:
 - Date: %s
 - Balance: $%.2f
 - Environment: Python Docker sandbox (mapped to './sandbox')
 - Persistence: Docker sandbox is mapped to your local './sandbox' folder.
-- Custom Tools: You can create your own tools using the ` + "`define_tool`" + ` function!
-  - Tools are Python scripts stored in './sandbox/addons/'
-  - The agent CAN access this folder via ` + "`docker_shell`" + ` commands
-  - After creating a tool with ` + "`define_tool`" + `, it's immediately available for use
-  - Example: define_tool(name="fetch_weather", description="...", code="return requests.get(...).text")
+  - Custom Tools: You can create your own tools using the ` + "`define_tool`" + ` function!
+    - Tools are Python scripts stored in './sandbox/addons/'
+    - The agent CAN access this folder via ` + "`docker_shell`" + ` commands
+    - After creating a tool with ` + "`define_tool`" + `, it's immediately available for use
+    - **CRITICAL**: Use OpenAI-compatible JSON schema for ` + "`parameters`" + `.
+    - **RULE**: All "type" fields must be **lowercase** (e.g., "object", "string", "number", "boolean", "integer", "array").
+    - Example: ` + "`define_tool(name=\"calc\", description=\"Math\", parameters={\"type\":\"object\", \"properties\":{\"x\":{\"type\":\"number\"}}}, code=\"return args['x']*2\")`" + `
 
 CORE INSTRUCTIONS:
 - Use tools to interact with your environment.

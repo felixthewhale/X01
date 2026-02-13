@@ -41,8 +41,8 @@ func ParsePythonToolMetadata(content string) (*ToolMetadata, error) {
 		metadata.Description = strings.TrimSpace(m[1])
 	}
 
-	// Extract PARAMETERS (JSON)
-	paramPattern := regexp.MustCompile(`(?s)PARAMETERS:\s*(\{.*?\}\s*)\n`)
+	// Extract PARAMETERS (JSON) - Greedily match from the first { to the last }
+	paramPattern := regexp.MustCompile(`(?s)PARAMETERS:\s*(\{.*\})`)
 	if m := paramPattern.FindStringSubmatch(docstring); len(m) > 1 {
 		paramJSON := strings.TrimSpace(m[1])
 		var params map[string]interface{}

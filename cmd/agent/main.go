@@ -87,11 +87,8 @@ func main() {
 	tools.LoadAddons()
 
 	// 2. Loop
-	registry := tools.GetToolRegistry()
-	schemas := tools.GetToolSchemas()
-
 	for {
-		err := runHeartbeat(registry, schemas)
+		err := runHeartbeat()
 		if err != nil {
 			if err == context.DeadlineExceeded {
 				logger.LogError("Cycle Timeout: LLM took too long to respond. Retrying...")
@@ -114,7 +111,7 @@ func main() {
 			pollInterval = int(interval)
 		}
 
-// Clear any pending wakeups before sleeping
+		// Clear any pending wakeups before sleeping
 		select {
 		case <-server.WakeupChan:
 		default:
@@ -132,7 +129,11 @@ func main() {
 	}
 }
 
-func runHeartbeat(registry map[string]core.ToolFunc, schemas []interface{}) error {
+func runHeartbeat() error {
+	// 0. Fetch latest tools
+	registry := tools.GetToolRegistry()
+	schemas := tools.GetToolSchemas()
+
 	// 1. Fetch State and Memories
 	stateText, _ := db.GetState("prime_context")
 	memories, err := db.GetMemories(20)
@@ -144,10 +145,31 @@ func runHeartbeat(registry map[string]core.ToolFunc, schemas []interface{}) erro
 	server.SetActivity("Synthesizing context & history...")
 	sysMsg := prompt.RenderPrompt(stateText, memories, 3.0)
 	
-	// 3. Get History from DB
-	history, err := db.GetHistory(20)
+	// 3. Get History from DB (Smart Context Window)
+	history, err := db.GetContextWindow(50)
 	if err != nil {
 		return fmt.Errorf("failed to get history: %v", err)
+	}
+
+	// 3.1 Fetch Pending Web Messages
+	pendingMsgs, err := db.FetchAndClearPending()
+	if err != nil {
+		logger.LogError("Failed to fetch pending messages: %v", err)
+	}
+	if len(pendingMsgs) > 0 {
+		logger.LogInfo("Found %d pending messages from web dashboard", len(pendingMsgs))
+		for _, content := range pendingMsgs {
+			// Create and save the user message to history
+			msg := db.Message{
+				Role:    "user",
+				Content: content,
+			}
+			if err := db.SaveMessage(msg); err != nil {
+				logger.LogError("Failed to save pending message: %v", err)
+			}
+			// Add to current history context so the agent reacts immediately
+			history = append(history, msg)
+		}
 	}
 
 	// 4. Prepare Context
@@ -156,27 +178,18 @@ func runHeartbeat(registry map[string]core.ToolFunc, schemas []interface{}) erro
 	}
 	messages = append(messages, history...)
 	
-	// 5. Handle Pulse Strategy
-	// Gemini rejects consecutive human/user messages. If history ends in a user turn, skip redundancy.
-	hasRecentUser := false
-	if len(history) > 0 && history[len(history)-1].Role == "user" {
-		hasRecentUser = true
+	// 5. Check if we should act
+	if len(history) > 0 {
+		lastMsg := history[len(history)-1]
+		if lastMsg.Role == "assistant" && lastMsg.ToolCalls == nil {
+			logger.LogInfo("Nothing for AI to do (last message is assistant). Waiting for user...")
+			return nil
+		}
 	}
-
-	pulse := fmt.Sprintf("HEARTBEAT PULSE:\n{\"time\": %d}\n\nThis is an automated heartbeat pulse. Continue your cycle.", time.Now().Unix())
-	pulseMsg := db.Message{Role: "user", Content: pulse}
-	
-	if !hasRecentUser {
-		messages = append(messages, pulseMsg)
-	} else {
-		logger.LogInfo("Suppressing redundant heartbeat (history already ends with user activity).")
-	}
-	
-	pulseSaved := hasRecentUser // If it's already in history, it's "saved"
 
 	// 6. Execution Loop (LSPR)
 	currentTurns := []db.Message{}
-	maxTurns := 10
+	maxTurns := 30
 	logger.LogInfo("Starting LSPR cycle (max %d turns)...", maxTurns)
 	
 	for turn := 0; turn < maxTurns; turn++ {
@@ -192,11 +205,6 @@ func runHeartbeat(registry map[string]core.ToolFunc, schemas []interface{}) erro
 		// Buffer for messages in THIS specific turn
 		thisTurnMsgs := []db.Message{}
 		
-		// Conditionally persist the pulse ONLY if the agent acts and it wasn't already in history
-		if (msg.Content != "" || len(toolCalls) > 0) && !pulseSaved {
-			thisTurnMsgs = append(thisTurnMsgs, pulseMsg)
-			pulseSaved = true
-		}
 		
 		thisTurnMsgs = append(thisTurnMsgs, *msg)
 		currentTurns = append(currentTurns, *msg)
@@ -214,8 +222,13 @@ func runHeartbeat(registry map[string]core.ToolFunc, schemas []interface{}) erro
 			break
 		}
 
+		didReload := false
 		for _, call := range toolCalls {
 			logger.LogInfo("Tool Call: %s", call.Function.Name)
+
+			if call.Function.Name == "reload_addons" || call.Function.Name == "define_tool" {
+				didReload = true
+			}
 
 			var result string
 			if fn, ok := registry[call.Function.Name]; ok {
@@ -261,6 +274,13 @@ func runHeartbeat(registry map[string]core.ToolFunc, schemas []interface{}) erro
 			}
 			thisTurnMsgs = append(thisTurnMsgs, toolResultMsg)
 			currentTurns = append(currentTurns, toolResultMsg)
+		}
+
+		// Refresh registry if tools were changed in this turn
+		if didReload {
+			logger.LogInfo("Refreshing tool registry for the next turn...")
+			registry = tools.GetToolRegistry()
+			schemas = tools.GetToolSchemas()
 		}
 
 		// ATOMIC COMMIT for this specific turn segment (Assistant + Tools)

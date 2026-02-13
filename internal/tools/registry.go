@@ -422,6 +422,32 @@ func createAddonRunner(addon Addon) core.ToolFunc {
 	}
 }
 
+// sanitizeSchema recursively ensures all "type" fields are lowercase as required by Gemini
+func sanitizeSchema(schema interface{}) interface{} {
+	switch v := schema.(type) {
+	case map[string]interface{}:
+		newMap := make(map[string]interface{})
+		for key, val := range v {
+			if key == "type" {
+				if str, ok := val.(string); ok {
+					newMap[key] = strings.ToLower(str)
+					continue
+				}
+			}
+			newMap[key] = sanitizeSchema(val)
+		}
+		return newMap
+	case []interface{}:
+		newSlice := make([]interface{}, len(v))
+		for i, val := range v {
+			newSlice[i] = sanitizeSchema(val)
+		}
+		return newSlice
+	default:
+		return v
+	}
+}
+
 // DefineTool creates a new custom tool at runtime
 func DefineTool(ctx context.Context, args map[string]interface{}) string {
 	name, _ := args["name"].(string)
@@ -432,13 +458,14 @@ func DefineTool(ctx context.Context, args map[string]interface{}) string {
 		return "Error: 'name' and 'code' are required"
 	}
 
-	// Parse parameters (optional)
+	// Parse and sanitize parameters
 	parameters := map[string]interface{}{
 		"type":       "object",
 		"properties": map[string]interface{}{},
 	}
 	if params, ok := args["parameters"].(map[string]interface{}); ok {
-		parameters = params
+		// Automatically fix schema types (OBJECT -> object)
+		parameters = sanitizeSchema(params).(map[string]interface{})
 	}
 
 	// Build Python tool file
@@ -463,8 +490,11 @@ if __name__ == "__main__":
     args = json.loads(input_data) if input_data else {}
     
     # Execute and print result
-    result = execute(args)
-    print(result)
+    try:
+        result = execute(args)
+        print(result)
+    except Exception as e:
+        print(f"Execution Error: {str(e)}")
 `, name, description, string(paramsJSON), indentCode(code, "    "))
 
 	// Ensure addons directory exists

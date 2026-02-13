@@ -187,6 +187,67 @@ func GetHistory(limit int) ([]Message, error) {
 	return history, nil
 }
 
+// GetContextWindow fetches the last `limit` messages but ensures we don't slice a turn in half.
+// If the oldest message is a "tool" message, it keeps fetching backwards until it finds the
+// start of the turn (the Assistant message that called the tool).
+func GetContextWindow(limit int) ([]Message, error) {
+	// 1. Fetch initial batch
+	history, err := GetHistory(limit)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(history) == 0 {
+		return history, nil
+	}
+
+	// History is returned Newest -> Oldest by GetHistory? 
+	// Wait, GetHistory sorts it Oldest -> Newest before returning!
+	// Let's check GetHistory implementation...
+	// It fetches DESC, then Reverses. So index 0 is Oldest.
+
+	// 2. Check strict turn boundary at the start (history[0])
+	// If history[0] is a Tool, we are missing its context (the Assistant call).
+	// We must fetch backwards.
+	
+	for {
+		if len(history) == 0 {
+			break
+		}
+		
+		oldest := history[0]
+		if oldest.Role == "tool" {
+			// Fetch the message immediately preceding this one
+			// (ID < oldest.ID) ORDER BY ID DESC LIMIT 1
+			var prevMsg Message
+			var toolCallsStr string
+			
+			query := "SELECT id, role, content, tool_calls, tool_call_id, name, reasoning, timestamp FROM messages WHERE id < ? ORDER BY id DESC LIMIT 1"
+			err := DB.QueryRow(query, oldest.ID).Scan(&prevMsg.ID, &prevMsg.Role, &prevMsg.Content, &toolCallsStr, &prevMsg.ToolCallID, &prevMsg.Name, &prevMsg.Reasoning, &prevMsg.Timestamp)
+			
+			if err == sql.ErrNoRows {
+				// No more history? Then this tool message is truly an orphan (data corruption/cleanup).
+				// We can't fix it. Stop.
+				break
+			} else if err != nil {
+				return nil, err
+			}
+
+			if toolCallsStr != "" {
+				prevMsg.ToolCalls = json.RawMessage(toolCallsStr)
+			}
+
+			// Prepend to history
+			history = append([]Message{prevMsg}, history...)
+			
+		} else {
+			break
+		}
+	}
+
+	return history, nil
+}
+
 func SearchMessages(keyword string, limit int) ([]Message, error) {
 	query := `SELECT id, role, content, tool_calls, tool_call_id, name, reasoning, timestamp 
 	          FROM messages 

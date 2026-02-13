@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>X01 | ORBITAL DASHBOARD</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>X01 ORBITAL</h1>
+            <div class="status-badge">
+                <div class="dot"></div>
+                SYSTEM ACTIVE
+            </div>
+        </header>
+
+        <div id="activity-monitor" class="activity-banner">INITIALIZING TELEMETRY...</div>
+
+        <div class="card">
+            <span class="section-label">MISSION HISTORY</span>
+            <div id="history" class="history-section">
+                <!-- Messages populate here -->
+            </div>
+        </div>
+
+        <div class="card">
+            <div id="prompt-container" class="prompt-box">
+                <span class="section-label">AWAITING AUTHORIZATION</span>
+                <div id="active-prompt-text"></div>
+            </div>
+
+            <textarea id="message-input" placeholder="TRANSMIT INSTRUCTION..."></textarea>
+            <button id="send-btn">TRANSMIT PACKET</button>
+        </div>
+    </div>
+
+    <div id="toast" class="toast">PACKET SENT</div>
+
+    <script src="/web/app.js"></script>
+</body>
+</html>

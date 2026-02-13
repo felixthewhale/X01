@@ -1,0 +1,19 @@
+{
+    "type": "function",
+    "function": {
+        "name": "hello_world",
+        "description": "A simple example addon tool that greets a user. Dont remove this example",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The name of the person to greet."
+                }
+            },
+            "required": [
+                "name"
+            ]
+        }
+    }
+}
