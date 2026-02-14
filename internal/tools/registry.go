@@ -243,6 +243,31 @@ func UpdateState(ctx context.Context, args map[string]interface{}) string {
 	return "State updated successfully."
 }
 
+// CustomTool dispatches calls to dynamic addons
+func CustomTool(ctx context.Context, args map[string]interface{}) string {
+	name, _ := args["name"].(string)
+	params, _ := args["parameters"].(map[string]interface{})
+
+	logger.LogTool("custom_tool", "Dispatching to: %s", name)
+
+	// Look up the addon
+	var target *Addon
+	for _, addon := range loadedAddons {
+		if addon.Name == name {
+			target = &addon
+			break
+		}
+	}
+
+	if target == nil {
+		return fmt.Sprintf("Error: Custom tool '%s' not found.", name)
+	}
+
+	// Reuse existing runner logic
+	runner := createAddonRunner(*target)
+	return runner(ctx, params)
+}
+
 func ReplaceState(ctx context.Context, args map[string]interface{}) string {
 	oldText, ok1 := args["old_text"].(string)
 	newText, ok2 := args["new_text"].(string)
@@ -470,6 +495,16 @@ func DefineTool(ctx context.Context, args map[string]interface{}) string {
 
 	// Build Python tool file
 	paramsJSON, _ := json.MarshalIndent(parameters, "", "    ")
+
+	var toolBody string
+	if strings.Contains(code, "def execute(args):") {
+		// Code already contains the entry point
+		toolBody = code
+	} else {
+		// Wrap in function
+		toolBody = fmt.Sprintf("def execute(args):\n    \"\"\"Main entry point for the tool.\"\"\"\n%s", indentCode(code, "    "))
+	}
+
 	toolContent := fmt.Sprintf(`#!/usr/bin/env python3
 """
 TOOL_NAME: %s
@@ -480,8 +515,6 @@ PARAMETERS: %s
 import sys
 import json
 
-def execute(args):
-    """Main entry point for the tool."""
 %s
 
 if __name__ == "__main__":
@@ -492,10 +525,11 @@ if __name__ == "__main__":
     # Execute and print result
     try:
         result = execute(args)
-        print(result)
+        if result is not None:
+            print(result)
     except Exception as e:
         print(f"Execution Error: {str(e)}")
-`, name, description, string(paramsJSON), indentCode(code, "    "))
+`, name, description, string(paramsJSON), toolBody)
 
 	// Ensure addons directory exists
 	os.MkdirAll("sandbox/addons", 0755)
@@ -547,11 +581,7 @@ func GetToolRegistry() map[string]core.ToolFunc {
 		"sleep":          Sleep,
 		"reload_addons":  ReloadAddons,
 		"define_tool":    DefineTool,
-	}
-
-	// Register dynamic addons
-	for _, addon := range loadedAddons {
-		registry[addon.Name] = createAddonRunner(addon)
+		"custom_tool":    CustomTool,
 	}
 
 	return registry
@@ -796,13 +826,28 @@ func GetToolSchemas() []interface{} {
 				},
 			},
 		},
-	}
-
-	// Register dynamic addon schemas
-	for _, addon := range loadedAddons {
-		schemas = append(schemas, addon.Schema)
+		map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "custom_tool",
+				"description": "Execute a custom tool by name with parameters. Use this for any tools not listed in the main schema.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"name": map[string]interface{}{
+							"type":        "string",
+							"description": "The name of the custom tool to execute",
+						},
+						"parameters": map[string]interface{}{
+							"type":        "object",
+							"description": "The parameters for the custom tool (key-value pairs)",
+						},
+					},
+					"required": []string{"name", "parameters"},
+				},
+			},
+		},
 	}
 
 	return schemas
 }
-
