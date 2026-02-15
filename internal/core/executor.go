@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -28,7 +29,14 @@ func ExecuteTool(ctx context.Context, fn ToolFunc, args map[string]interface{}, 
 	case res := <-resChan:
 		// Truncate output if too long
 		if len(res) > 10000 {
-			res = res[:5000] + "\n...[TRUNCATED]...\n" + res[len(res)-5000:]
+			head := res[:5000]
+			tail := res[len(res)-5000:]
+			middle := res[5000 : len(res)-5000]
+
+			charCount := len(middle)
+			lineCount := strings.Count(middle, "\n")
+
+			res = fmt.Sprintf("%s\n...[TRUNCATED %d characters and %d lines]...\n%s", head, charCount, lineCount, tail)
 		}
 		return res
 	case <-toolCtx.Done():

@@ -582,6 +582,16 @@ func GetToolRegistry() map[string]core.ToolFunc {
 		"reload_addons":  ReloadAddons,
 		"define_tool":    DefineTool,
 		"custom_tool":    CustomTool,
+
+		// Experimental: Moltbook Integration
+		"moltbook_register": MoltbookRegister,
+		"moltbook_post":     MoltbookPost,
+		"moltbook_feed":     MoltbookGetFeed,
+		"moltbook_search":   MoltbookSearch,
+		"moltbook_comment":  MoltbookComment,
+		"moltbook_vote":     MoltbookVote,
+		"moltbook_get_token": MoltbookGetIdentityToken,
+		"moltbook_verify":    MoltbookVerify,
 	}
 
 	return registry
@@ -848,6 +858,127 @@ func GetToolSchemas() []interface{} {
 			},
 		},
 	}
+
+	// Moltbook Schemas (Experimental)
+	schemas = append(schemas,
+		map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "moltbook_register",
+				"description": "Register your agent on Moltbook. Recommended first step.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"name":        map[string]interface{}{"type": "string", "description": "Agent name"},
+						"description": map[string]interface{}{"type": "string", "description": "What you do"},
+					},
+					"required": []string{"name"},
+				},
+			},
+		},
+		map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "moltbook_post",
+				"description": "Create a new post on Moltbook.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"submolt": map[string]interface{}{"type": "string", "description": "Target submolt (e.g., 'aithoughts')"},
+						"title":   map[string]interface{}{"type": "string", "description": "Post title"},
+						"content": map[string]interface{}{"type": "string", "description": "Post content"},
+						"url":     map[string]interface{}{"type": "string", "description": "Optional URL link"},
+					},
+					"required": []string{"submolt", "title"},
+				},
+			},
+		},
+		map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "moltbook_feed",
+				"description": "Get your personalized Moltbook feed.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"sort": map[string]interface{}{"type": "string", "description": "Sort order: hot, new, top, rising"},
+					},
+				},
+			},
+		},
+		map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "moltbook_search",
+				"description": "AI-powered semantic search on Moltbook.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"q":    map[string]interface{}{"type": "string", "description": "Natural language query"},
+						"type": map[string]interface{}{"type": "string", "description": "posts, comments, or all"},
+					},
+					"required": []string{"q"},
+				},
+			},
+		},
+		map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "moltbook_comment",
+				"description": "Add a comment or reply to a post.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"post_id":   map[string]interface{}{"type": "string", "description": "Target post ID"},
+						"content":   map[string]interface{}{"type": "string", "description": "Comment content"},
+						"parent_id": map[string]interface{}{"type": "string", "description": "Optional parent comment ID for replies"},
+					},
+					"required": []string{"post_id", "content"},
+				},
+			},
+		},
+		map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "moltbook_vote",
+				"description": "Upvote or downvote a post.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"post_id": map[string]interface{}{"type": "string", "description": "Post ID"},
+						"vote":    map[string]interface{}{"type": "string", "description": "upvote or downvote"},
+					},
+					"required": []string{"post_id", "vote"},
+				},
+			},
+		},
+		map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "moltbook_get_token",
+				"description": "Fetch a temporary identity token for authenticating with third-party services. Token is valid for 1 hour.",
+				"parameters": map[string]interface{}{
+					"type":       "object",
+					"properties": map[string]interface{}{},
+				},
+			},
+		},
+		map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "moltbook_verify",
+				"description": "Solve the human/bot verification challenge on Moltbook.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"answer":            map[string]interface{}{"type": "string", "description": "The mathematical answer as a string (e.g., '41.00')"},
+						"verification_code": map[string]interface{}{"type": "string", "description": "The verification code provided by Moltbook"},
+					},
+					"required": []string{"answer", "verification_code"},
+				},
+			},
+		},
+	)
 
 	return schemas
 }

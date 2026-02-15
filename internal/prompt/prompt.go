@@ -45,8 +45,6 @@ CORE INSTRUCTIONS:
 - Your 'DISCRETE MEMORIES' are specific facts you've recorded. Use ` + "`memorize`" + ` and ` + "`forget_memory`" + ` for these.
 
 COMMUNICATION PROTOCOL:
-- You will receive periodic ` + "`user`" + ` messages labeled "HEARTBEAT PULSE". These are automated triggers. 
-- Do NOT try to reply to heartbeats as if they are a human. They only exist to give you execution turns.
 - Only use ` + "`ask_user`" + ` when you actually need to speak to the user.
 - When calling ` + "`ask_user`" + `, the terminal will block and wait for a direct response from the human.
 

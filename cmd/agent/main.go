@@ -178,16 +178,7 @@ func runHeartbeat() error {
 	}
 	messages = append(messages, history...)
 	
-	// 5. Check if we should act
-	if len(history) > 0 {
-		lastMsg := history[len(history)-1]
-		if lastMsg.Role == "assistant" && lastMsg.ToolCalls == nil {
-			logger.LogInfo("Nothing for AI to do (last message is assistant). Waiting for user...")
-			return nil
-		}
-	}
-
-	// 6. Execution Loop (LSPR)
+	// 5. Execution Loop (LSPR)
 	currentTurns := []db.Message{}
 	maxTurns := 30
 	logger.LogInfo("Starting LSPR cycle (max %d turns)...", maxTurns)
@@ -212,14 +203,36 @@ func runHeartbeat() error {
 		if len(toolCalls) == 0 {
 			if msg.Content != "" {
 				logger.LogAgent("%s", msg.Content)
-			}
-			// Save the final results of the cycle
-			if len(thisTurnMsgs) > 0 {
-				if err := db.SaveMessages(thisTurnMsgs); err != nil {
-					logger.LogError("Failed to save final turn message: %v", err)
+
+				// --- Implicit Engagement Upgrade ---
+				// If there's content but no tool call, synthesize a virtual 'ask_user' call
+				// to maintain turn order and trigger the next turn naturally.
+				virtualCallID := fmt.Sprintf("v-call-%d", time.Now().UnixNano())
+				tc := core.ToolCall{
+					ID:   virtualCallID,
+					Type: "function",
 				}
+				tc.Function.Name = "ask_user"
+				tc.Function.Arguments = fmt.Sprintf(`{"question":%q}`, msg.Content)
+
+				toolCalls = []core.ToolCall{tc}
+
+				// Update the assistant message in history to include this virtual call
+				tcBytes, _ := json.Marshal(toolCalls)
+				msg.ToolCalls = tcBytes
+
+				// Replace the last message in currentTurns and thisTurnMsgs with the updated one
+				currentTurns[len(currentTurns)-1] = *msg
+				thisTurnMsgs[len(thisTurnMsgs)-1] = *msg
+			} else {
+				// Truly empty response? Break and let it sleep.
+				if len(thisTurnMsgs) > 0 {
+					if err := db.SaveMessages(thisTurnMsgs); err != nil {
+						logger.LogError("Failed to save final turn message: %v", err)
+					}
+				}
+				break
 			}
-			break
 		}
 
 		didReload := false
