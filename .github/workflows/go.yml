@@ -39,14 +39,14 @@ jobs:
 
       - name: Build Binary
         run: |
-          mkdir -p build
-          GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build -v -o build/${{ matrix.binary_name }} ./cmd/agent/main.go
+          mkdir -p dist
+          GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build -v -o dist/${{ matrix.binary_name }} ./cmd/agent/main.go
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.os }}-${{ matrix.arch }}
-          path: build/${{ matrix.binary_name }}
+          path: dist/${{ matrix.binary_name }}
 
   release:
     name: Create Release
@@ -59,15 +59,15 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: build/
+          path: dist/
           merge-multiple: true
 
+      - name: List files
+        run: ls -R dist/
+
       - name: Publish Release Assets
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
-          files: |
-            build/x01-linux-amd64
-            build/x01-windows-amd64.exe
-            build/x01-darwin-arm64
+          files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
