@@ -136,6 +136,12 @@ func runHeartbeat() error {
 
 	// 1. Fetch State and Memories
 	stateText, _ := db.GetState("prime_context")
+	configStr, _ := db.GetState("config")
+	config := map[string]interface{}{}
+	if configStr != "" {
+		json.Unmarshal([]byte(configStr), &config)
+	}
+
 	memories, err := db.GetMemories(20)
 	if err != nil {
 		logger.LogError("Failed to fetch memories: %v", err)
@@ -188,7 +194,7 @@ func runHeartbeat() error {
 		server.SetActivity(fmt.Sprintf("Core Processing: Turn %d", turn+1))
 		
 		fullContext := append(messages, currentTurns...)
-		msg, toolCalls, err := core.LLMCall(fullContext, schemas)
+		msg, toolCalls, err := core.LLMCall(fullContext, schemas, config)
 		if err != nil {
 			return err
 		}

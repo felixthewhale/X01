@@ -102,9 +102,9 @@ func ensureContainer(image string) error {
 	// 3. Warmup check (ensure curl/wget are present)
 	warmupCheck := exec.Command("docker", "exec", ContainerName, "which", "curl")
 	if err := warmupCheck.Run(); err != nil {
-		logger.LogInfo("Warming up sandbox: installing curl, wget, and build-essential...")
+		logger.LogInfo("Warming up sandbox: installing curl, wget, python3, and build-essential...")
 		installCmd := exec.Command("docker", "exec", ContainerName, "sh", "-c", 
-			"apt-get update && apt-get install -y curl wget build-essential")
+			"apt-get update && apt-get install -y curl wget python3 python3-pip build-essential")
 		if err := installCmd.Run(); err != nil {
 			logger.LogWarning("Sandbox warmup failed: %v", err)
 		} else {
@@ -119,7 +119,7 @@ func DockerShell(ctx context.Context, args map[string]interface{}) string {
 	command, _ := args["command"].(string)
 	image, ok := args["image"].(string)
 	if !ok || image == "" {
-		image = "python:3.10-slim"
+		image = "debian:stable-slim"
 	}
 
 	if err := ensureContainer(image); err != nil {
@@ -421,7 +421,7 @@ func createAddonRunner(addon Addon) core.ToolFunc {
 		logger.LogTool(addon.Name, "Executing addon in Docker: %s", addon.ScriptPath)
 
 		// Ensure container is running
-		if err := ensureContainer("python:3.10-slim"); err != nil {
+		if err := ensureContainer("debian:stable-slim"); err != nil {
 			return fmt.Sprintf("Error: Failed to start sandbox: %v", err)
 		}
 

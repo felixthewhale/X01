@@ -29,10 +29,18 @@ type LLMMessage struct {
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
+type ReasoningConfig struct {
+	Enabled   bool   `json:"enabled,omitempty"`
+	Effort    string `json:"effort,omitempty"`
+	MaxTokens int    `json:"max_tokens,omitempty"`
+	Exclude   bool   `json:"exclude,omitempty"`
+}
+
 type LLMResponse struct {
 	Choices []struct {
 		Message struct {
 			db.Message
+			Reasoning        string `json:"reasoning"`
 			ReasoningContent string `json:"reasoning_content"`
 		} `json:"message"`
 	} `json:"choices"`
@@ -184,7 +192,7 @@ func SanitizeMessages(messages []db.Message) []db.Message {
 	return pass2
 }
 
-func LLMCall(messages []db.Message, tools []interface{}) (*db.Message, []ToolCall, error) {
+func LLMCall(messages []db.Message, tools []interface{}, config map[string]interface{}) (*db.Message, []ToolCall, error) {
 	apiKey := os.Getenv("OPENROUTER_API_KEY")
 	if apiKey == "" {
 		return &db.Message{Role: "assistant", Content: "No API Key"}, nil, nil
@@ -193,11 +201,51 @@ func LLMCall(messages []db.Message, tools []interface{}) (*db.Message, []ToolCal
 	// Apply sequence protection for Gemini
 	messages = SanitizeMessages(messages)
 
+	model := "google/gemini-3-flash-preview"
+	if m, ok := config["model"].(string); ok && m != "" {
+		model = m
+	}
+
 	payload := map[string]interface{}{
-		"model":       "google/gemini-3-flash-preview",
+		"model":       model,
 		"messages":    messages,
 		"tools":       tools,
 		"tool_choice": "auto",
+	}
+
+	// Handle Reasoning Configuration
+	reasoningObj := map[string]interface{}{}
+	
+	// 1. Check for Env Defaults
+	if effort := os.Getenv("OPENROUTER_REASONING_EFFORT"); effort != "" {
+		reasoningObj["effort"] = effort
+	}
+
+	// 2. Override with DB Config if present
+	if r, ok := config["reasoning"].(map[string]interface{}); ok {
+		for k, v := range r {
+			reasoningObj[k] = v
+		}
+	} else if r, ok := config["reasoning"].(ReasoningConfig); ok {
+		// Convert struct to map if needed or just use it
+		if r.Effort != "" { reasoningObj["effort"] = r.Effort }
+		if r.MaxTokens != 0 { reasoningObj["max_tokens"] = r.MaxTokens }
+		reasoningObj["exclude"] = r.Exclude
+		reasoningObj["enabled"] = r.Enabled
+	}
+
+	if len(reasoningObj) > 0 {
+		// Conflict Resolution: Some models error if BOTH effort and max_tokens are provided.
+		// If effort is present, we drop max_tokens to be safe.
+		if reasoningObj["effort"] != nil && reasoningObj["effort"] != "" {
+			delete(reasoningObj, "max_tokens")
+		}
+
+		// Ensure enabled is true if we are trying to use reasoning
+		if _, ok := reasoningObj["enabled"]; !ok {
+			reasoningObj["enabled"] = true
+		}
+		payload["reasoning"] = reasoningObj
 	}
 
 	startTime := time.Now()
@@ -260,6 +308,9 @@ func LLMCall(messages []db.Message, tools []interface{}) (*db.Message, []ToolCal
 	}
 
 	fullMsg := result.Choices[0].Message.Message
+	if result.Choices[0].Message.Reasoning != "" {
+		fullMsg.Reasoning = result.Choices[0].Message.Reasoning
+	}
 	if result.Choices[0].Message.ReasoningContent != "" {
 		fullMsg.Reasoning = result.Choices[0].Message.ReasoningContent
 	}
