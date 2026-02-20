@@ -46,15 +46,38 @@ type LLMResponse struct {
 	} `json:"choices"`
 }
 
+// SynthesizeVirtualCall creates a fake 'ask_user' tool call for messages that have content but no tools.
+// This ensures the LSPR loop handles the response as an interactive engagement rather than a silent exit.
+func SynthesizeVirtualCall(msg *db.Message) ([]ToolCall, error) {
+	if msg.Content == "" {
+		return nil, nil
+	}
+
+	virtualCallID := fmt.Sprintf("v-call-%d", time.Now().UnixNano())
+	tc := ToolCall{
+		ID:   virtualCallID,
+		Type: "function",
+	}
+	tc.Function.Name = "ask_user"
+	tc.Function.Arguments = fmt.Sprintf(`{"question":%q}`, msg.Content)
+
+	toolCalls := []ToolCall{tc}
+
+	tcBytes, err := json.Marshal(toolCalls)
+	if err != nil {
+		return nil, err
+	}
+	msg.ToolCalls = tcBytes
+
+	return toolCalls, nil
+}
+
 func SanitizeMessages(messages []db.Message) []db.Message {
 	if len(messages) == 0 {
 		return messages
 	}
 
 	// Pass 1: Handle Tool Call Pairing
-	// We must ensure every Assistant message with ToolCalls is followed IMMEDIATELY 
-	// by the corresponding Tool messages. If any are missing, we strip the ToolCalls 
-	// from the Assistant to prevent "Unanswered tool call" errors.
 	var pass1 []db.Message
 	
 	i := 0
@@ -62,11 +85,8 @@ func SanitizeMessages(messages []db.Message) []db.Message {
 		m := messages[i]
 
 		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
-			// This is an assistant attempting to call tools.
-			// We need to verify that ALL referenced tools have a corresponding "tool" message following.
 			var toolCalls []ToolCall
 			if err := json.Unmarshal(m.ToolCalls, &toolCalls); err != nil {
-				// Malformed tool calls? Strip them.
 				m.ToolCalls = nil
 				if m.Content != "" {
 					pass1 = append(pass1, m)
@@ -75,8 +95,6 @@ func SanitizeMessages(messages []db.Message) []db.Message {
 				continue
 			}
 
-			// Look ahead for tool responses
-			// They must be the NEXT messages in the sequence.
 			responseMap := make(map[string]db.Message)
 			j := i + 1
 			for j < len(messages) {
@@ -88,7 +106,6 @@ func SanitizeMessages(messages []db.Message) []db.Message {
 				}
 			}
 
-			// Check if we have ALL responses
 			allFound := true
 			for _, tc := range toolCalls {
 				if _, ok := responseMap[tc.ID]; !ok {
@@ -98,38 +115,23 @@ func SanitizeMessages(messages []db.Message) []db.Message {
 			}
 
 			if allFound {
-				// Perfect turn. Keep Assistant + All Tool Responses
 				pass1 = append(pass1, m)
-				// Append the tool responses in the correct order as they appeared
 				for k := i + 1; k < j; k++ {
 					pass1 = append(pass1, messages[k])
 				}
-				i = j // Advance past this whole block
+				i = j 
 			} else {
-				// Imperfect turn. 
-				// The safest thing for Gemini is to pretend the tool call NEVER HAPPENED.
-				// We strip the ToolCalls from the assistant.
-				// AND we must SKIP the tool responses that did exist, otherwise they become orphaned "tool" messages.
-				
 				logger.LogWarning("Turn Fix: Stripping incomplete tool calls from Assistant msg %d. (Missing responses)", m.ID)
 				m.ToolCalls = nil
-				
-				// Keep the assistant message only if it has content
 				if m.Content != "" {
 					pass1 = append(pass1, m)
 				}
-				
-				// Skip the orphaned tool responses we found (advance i to j)
 				i = j 
 			}
 		} else if m.Role == "tool" {
-			// A tool message appearing on its own (not handled by the lookahead above).
-			// This is an ORPHAN. It has no preceding assistant call in this pass.
-			// We MUST drop it.
 			logger.LogWarning("Turn Fix: Dropping orphaned tool message %d (%s)", m.ID, m.ToolCallID)
 			i++
 		} else {
-			// User or System or simple Assistant
 			pass1 = append(pass1, m)
 			i++
 		}
@@ -145,7 +147,6 @@ func SanitizeMessages(messages []db.Message) []db.Message {
 
 		last := &pass2[len(pass2)-1]
 
-		// Merge User -> User
 		if last.Role == "user" && m.Role == "user" {
 			if m.Content != "" {
 				if last.Content != "" {
@@ -157,7 +158,6 @@ func SanitizeMessages(messages []db.Message) []db.Message {
 			continue
 		}
 
-		// Merge Assistant -> Assistant (ONLY if neither has tool calls)
 		if last.Role == "assistant" && m.Role == "assistant" {
 			if len(last.ToolCalls) == 0 && len(m.ToolCalls) == 0 {
 				if m.Content != "" {
@@ -174,8 +174,6 @@ func SanitizeMessages(messages []db.Message) []db.Message {
 		pass2 = append(pass2, m)
 	}
 
-	// Final Safety Check
-	// Ensure the list doesn't end with an Assistant message that has tool calls (which we don't have yet).
 	if len(pass2) > 0 {
 		last := pass2[len(pass2)-1]
 		if last.Role == "assistant" && len(last.ToolCalls) > 0 {
@@ -198,7 +196,6 @@ func LLMCall(messages []db.Message, tools []interface{}, config map[string]inter
 		return &db.Message{Role: "assistant", Content: "No API Key"}, nil, nil
 	}
 
-	// Apply sequence protection for Gemini
 	messages = SanitizeMessages(messages)
 
 	model := "google/gemini-3-flash-preview"
@@ -213,21 +210,16 @@ func LLMCall(messages []db.Message, tools []interface{}, config map[string]inter
 		"tool_choice": "auto",
 	}
 
-	// Handle Reasoning Configuration
 	reasoningObj := map[string]interface{}{}
-	
-	// 1. Check for Env Defaults
 	if effort := os.Getenv("OPENROUTER_REASONING_EFFORT"); effort != "" {
 		reasoningObj["effort"] = effort
 	}
 
-	// 2. Override with DB Config if present
 	if r, ok := config["reasoning"].(map[string]interface{}); ok {
 		for k, v := range r {
 			reasoningObj[k] = v
 		}
 	} else if r, ok := config["reasoning"].(ReasoningConfig); ok {
-		// Convert struct to map if needed or just use it
 		if r.Effort != "" { reasoningObj["effort"] = r.Effort }
 		if r.MaxTokens != 0 { reasoningObj["max_tokens"] = r.MaxTokens }
 		reasoningObj["exclude"] = r.Exclude
@@ -235,13 +227,9 @@ func LLMCall(messages []db.Message, tools []interface{}, config map[string]inter
 	}
 
 	if len(reasoningObj) > 0 {
-		// Conflict Resolution: Some models error if BOTH effort and max_tokens are provided.
-		// If effort is present, we drop max_tokens to be safe.
 		if reasoningObj["effort"] != nil && reasoningObj["effort"] != "" {
 			delete(reasoningObj, "max_tokens")
 		}
-
-		// Ensure enabled is true if we are trying to use reasoning
 		if _, ok := reasoningObj["enabled"]; !ok {
 			reasoningObj["enabled"] = true
 		}
@@ -270,10 +258,9 @@ func LLMCall(messages []db.Message, tools []interface{}, config map[string]inter
 	req.Header.Set("X-Title", "X01 Orbital Core")
 
 	client := &http.Client{
-		Timeout: 160 * time.Second, // Hard client timeout
+		Timeout: 160 * time.Second,
 	}
 
-	logger.LogInfo("-> Request Sent. Waiting for headers...")
 	resp, err := client.Do(req)
 	if err != nil {
 		logger.LogError("!!! Network/API request failed after %v: %v", time.Since(startTime), err)
@@ -281,29 +268,22 @@ func LLMCall(messages []db.Message, tools []interface{}, config map[string]inter
 	}
 	defer resp.Body.Close()
 
-	logger.LogInfo("<- Response Received (Status: %d) after %v.", resp.StatusCode, time.Since(startTime))
-
 	if resp.StatusCode != 200 {
 		body, _ := ioutil.ReadAll(resp.Body)
-		logger.LogError("API HTTP %d Error: %s", resp.StatusCode, string(body))
 		return nil, nil, fmt.Errorf("API Error (%d): %s", resp.StatusCode, string(body))
 	}
 
 	var result LLMResponse
-	// Read the response body into a buffer first, so it can be logged if choices are empty
 	responseBodyBytes, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read response body: %w", err)
 	}
-
-	logger.LogInfo("<- Body Downloaded (%d bytes). Parsing JSON...", len(responseBodyBytes))
 
 	if err := json.Unmarshal(responseBodyBytes, &result); err != nil {
 		return nil, nil, fmt.Errorf("failed to decode LLM response: %w", err)
 	}
 
 	if len(result.Choices) == 0 {
-		logger.LogError("LLM returned no choices. Raw response: %s", string(responseBodyBytes))
 		return nil, nil, fmt.Errorf("no choices returned from LLM")
 	}
 
@@ -315,11 +295,6 @@ func LLMCall(messages []db.Message, tools []interface{}, config map[string]inter
 		fullMsg.Reasoning = result.Choices[0].Message.ReasoningContent
 	}
 
-	if fullMsg.Reasoning != "" {
-		logger.LogThink("Reasoning: %s", fullMsg.Reasoning)
-	}
-
-	// Parse tool calls from RawMessage if present
 	var toolCalls []ToolCall
 	if fullMsg.ToolCalls != nil {
 		if err := json.Unmarshal(fullMsg.ToolCalls, &toolCalls); err != nil {
