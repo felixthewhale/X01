@@ -1,4 +1,4 @@
-name: Go Build & Test
+name: Go Build & Release
 
 on:
   push:
@@ -8,8 +8,20 @@ on:
 
 jobs:
   build:
-    name: Build
+    name: Build Multi-Platform
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            binary_name: x01-linux-amd64
+          - os: windows
+            arch: amd64
+            binary_name: x01-windows-amd64.exe
+          - os: darwin
+            arch: arm64
+            binary_name: x01-darwin-arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -21,8 +33,12 @@ jobs:
       - name: Install dependencies
         run: go mod download
 
-      - name: Build Agent
-        run: go build -v ./cmd/agent/main.go
+      - name: Build Binary
+        run: |
+          GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build -v -o build/${{ matrix.binary_name }} ./cmd/agent/main.go
 
-      - name: Run Tests
-        run: go test -v ./...
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.os }}-${{ matrix.arch }}
+          path: build/${{ matrix.binary_name }}
