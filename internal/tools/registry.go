@@ -364,54 +364,88 @@ type Addon struct {
 
 var loadedAddons []Addon
 
-// LoadAddons scans sandbox/addons/ for Python tools
+// LoadAddons scans addon directories for Python tools.
+// - sandbox/addons: runtime / user-defined tools (mounted into the Docker sandbox)
+// - addons:         repository-shipped example tools (staged into sandbox/addons)
 func LoadAddons() {
 	loadedAddons = []Addon{}
-	addonsRoot := "sandbox/addons"
+	roots := []string{"sandbox/addons", "addons"}
 
-	// Ensure addons directory exists
-	if _, err := os.Stat(addonsRoot); os.IsNotExist(err) {
-		logger.LogInfo("Creating addons directory: %s", addonsRoot)
-		os.MkdirAll(addonsRoot, 0755)
-		return
-	}
-
-	entries, err := os.ReadDir(addonsRoot)
-	if err != nil {
-		logger.LogError("Failed to read addons directory: %v", err)
-		return
-	}
-
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".py") {
+	for _, addonsRoot := range roots {
+		// Ensure addons directory exists
+		if _, err := os.Stat(addonsRoot); os.IsNotExist(err) {
+			logger.LogInfo("Creating addons directory: %s", addonsRoot)
+			os.MkdirAll(addonsRoot, 0755)
 			continue
 		}
 
-		toolPath := filepath.Join(addonsRoot, entry.Name())
-
-		// Parse tool metadata from Python file
-		metadata, err := LoadPythonTool(toolPath)
+		entries, err := os.ReadDir(addonsRoot)
 		if err != nil {
-			logger.LogWarning("Failed to load tool %s: %v", entry.Name(), err)
+			logger.LogError("Failed to read addons directory: %v", err)
 			continue
 		}
 
-		// Build OpenAI function schema
-		schema := map[string]interface{}{
-			"type": "function",
-			"function": map[string]interface{}{
-				"name":        metadata.Name,
-				"description": metadata.Description,
-				"parameters":  metadata.Parameters,
-			},
-		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".py") {
+				continue
+			}
 
-		loadedAddons = append(loadedAddons, Addon{
-			Name:       metadata.Name,
-			Schema:     schema,
-			ScriptPath: toolPath,
-		})
-		logger.LogSuccess("Loaded dynamic addon: %s (%s)", metadata.Name, entry.Name())
+			srcPath := filepath.Join(addonsRoot, entry.Name())
+
+			// Parse tool metadata from Python file
+			metadata, err := LoadPythonTool(srcPath)
+			if err != nil {
+				logger.LogWarning("Failed to load tool %s: %v", entry.Name(), err)
+				continue
+			}
+
+			// Skip tools already loaded (sandbox/addons wins over repo addons)
+			alreadyLoaded := false
+			for _, addon := range loadedAddons {
+				if addon.Name == metadata.Name {
+					alreadyLoaded = true
+					break
+				}
+			}
+			if alreadyLoaded {
+				logger.LogInfo("Skipping duplicate addon %s (%s)", metadata.Name, entry.Name())
+				continue
+			}
+
+			toolPath := srcPath
+			if addonsRoot == "addons" {
+				// Stage repo-shipped addons into the sandbox bind-mount
+				// (host ./sandbox -> container /workspace) so Docker can run them.
+				dstPath := filepath.Join("sandbox/addons", entry.Name())
+				content, rerr := os.ReadFile(srcPath)
+				if rerr != nil {
+					logger.LogWarning("Failed to read addon %s: %v", entry.Name(), rerr)
+					continue
+				}
+				if err := os.WriteFile(dstPath, content, 0644); err != nil {
+					logger.LogWarning("Failed to stage addon %s: %v", entry.Name(), err)
+					continue
+				}
+				toolPath = dstPath
+			}
+
+			// Build OpenAI function schema
+			schema := map[string]interface{}{
+				"type": "function",
+				"function": map[string]interface{}{
+					"name":        metadata.Name,
+					"description": metadata.Description,
+					"parameters":  metadata.Parameters,
+				},
+			}
+
+			loadedAddons = append(loadedAddons, Addon{
+				Name:       metadata.Name,
+				Schema:     schema,
+				ScriptPath: toolPath,
+			})
+			logger.LogSuccess("Loaded dynamic addon: %s (%s)", metadata.Name, entry.Name())
+		}
 	}
 }
 
