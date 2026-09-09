@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"X01/internal/core"
@@ -42,9 +43,17 @@ func main() {
 
 	server.Start(8080)
 
+	// Defaults persisted on first run (edit the "config" row in the DB to change):
+	//   poll_interval: seconds between heartbeats
+	//   timeout:       default tool timeout in seconds (tools.ResolveToolTimeout)
+	//   max_turns:     max LLM turns per heartbeat cycle
+	//   interactive:   true  -> a text-only reply becomes a blocking ask_user
+	//                  false -> the reply ends the cycle (autonomous mode)
 	config := map[string]interface{}{
 		"poll_interval": 5.0,
-		"timeout":       30.0,
+		"timeout":       float64(tools.DefaultToolTimeoutSeconds),
+		"max_turns":     30,
+		"interactive":   true,
 	}
 
 	if configStr != "" {
@@ -136,7 +145,16 @@ func runHeartbeat() error {
 	messages = append(messages, history...)
 	
 	currentTurns := []db.Message{}
-	maxTurns := 30
+
+	// Autonomy switch: by default (interactive=true) a text-only reply is turned
+	// into a blocking ask_user call, so the human always gets a chance to answer.
+	// With "interactive": false in the persisted config, such a reply simply ends
+	// the cycle - no synthesized tool call, no 10-minute wait.
+	interactive := configBool(config, "interactive", true)
+	maxTurns := configInt(config, "max_turns", 30)
+	if maxTurns < 1 {
+		maxTurns = 1
+	}
 	
 	for turn := 0; turn < maxTurns; turn++ {
 		server.SetActivity(fmt.Sprintf("Core Processing: Turn %d", turn+1))
@@ -155,7 +173,16 @@ func runHeartbeat() error {
 			if msg.Content != "" {
 				logger.LogAgent("%s", msg.Content)
 
-				// Refactored: Use helper function to synthesize virtual call
+				if !interactive {
+					// Autonomy mode: the reply is the cycle's final answer.
+					if len(thisTurnMsgs) > 0 {
+						db.SaveMessages(thisTurnMsgs)
+					}
+					break
+				}
+
+				// Interactive mode: synthesize a virtual ask_user call so the
+				// reply becomes a blocking question for the human.
 				var err error
 				toolCalls, err = core.SynthesizeVirtualCall(msg)
 				if err != nil {
@@ -185,25 +212,13 @@ func runHeartbeat() error {
 				var args map[string]interface{}
 				json.Unmarshal([]byte(call.Function.Arguments), &args)
 				
-				timeout := 30
-				if t, ok := args["timeout"].(int); ok {
-					timeout = t
-				} else if t, ok := args["timeout"].(float64); ok {
-					timeout = int(t)
-				}
-				
-				if call.Function.Name == "sleep" {
-					if s, ok := args["seconds"].(float64); ok {
-						if int(s)+5 > timeout { timeout = int(s) + 5 }
-					} else if s, ok := args["seconds"].(int); ok {
-						if s+5 > timeout { timeout = s + 5 }
-					}
-				} else if call.Function.Name == "ask_user" {
-					if timeout < 600 { timeout = 600 }
-				}
-				
+				// Default tool timeout comes from config["timeout"], per-call
+				// args["timeout"] overrides it, and ask_user/sleep get their
+				// own rules (see tools.ResolveToolTimeout).
+				timeout := tools.ResolveToolTimeout(call.Function.Name, args, config)
+
 				server.SetActivity(fmt.Sprintf("Tool Engagement: %s", call.Function.Name))
-				result = core.ExecuteTool(context.Background(), fn, args, time.Duration(timeout)*time.Second)
+				result = core.ExecuteTool(context.Background(), fn, args, timeout)
 			} else {
 				result = fmt.Sprintf("Error: Tool %s not found", call.Function.Name)
 			}
@@ -229,4 +244,45 @@ func runHeartbeat() error {
 	}
 
 	return nil
+}
+
+// configBool reads a boolean setting from the persisted config, tolerating the
+// JSON-decoded types (bool, "true"/"false" strings, 0/1 numbers).
+func configBool(config map[string]interface{}, key string, def bool) bool {
+	if config == nil {
+		return def
+	}
+	switch v := config[key].(type) {
+	case bool:
+		return v
+	case string:
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
+	case float64:
+		return v != 0
+	case int:
+		return v != 0
+	}
+	return def
+}
+
+// configInt reads an integer setting from the persisted config.
+func configInt(config map[string]interface{}, key string, def int) int {
+	if config == nil {
+		return def
+	}
+	switch v := config[key].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case json.Number:
+		if n, err := v.Int64(); err == nil {
+			return int(n)
+		}
+	}
+	return def
 }
