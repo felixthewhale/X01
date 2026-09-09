@@ -655,6 +655,9 @@ func GetToolRegistry() map[string]core.ToolFunc {
 		"reload_addons":  ReloadAddons,
 		"define_tool":    DefineTool,
 		"custom_tool":    CustomTool,
+		"read_file":      ReadFile,
+		"write_file":     WriteFile,
+		"edit_file":      EditFile,
 	}
 
 	return registry
@@ -920,8 +923,91 @@ func GetToolSchemas() []interface{} {
 				},
 			},
 		},
-	}
 
+		map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "read_file",
+				"description": "Read a UTF-8 text file, returning numbered lines. Use offset/limit to window large files instead of loading them whole. Paths are relative to the agent's working directory and cannot escape it.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"path": map[string]interface{}{
+							"type":        "string",
+							"description": "File path relative to the working directory",
+						},
+						"offset": map[string]interface{}{
+							"type":        "integer",
+							"description": "First line to return (1-based). Default 1.",
+						},
+						"limit": map[string]interface{}{
+							"type":        "integer",
+							"description": "Maximum number of lines to return. Default 200, max 2000.",
+						},
+					},
+					"required": []string{"path"},
+				},
+			},
+		},
+		map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "write_file",
+				"description": "Create a new file, or replace an existing one when overwrite=true. Refuses to clobber an existing file by default. For targeted changes to an existing file use edit_file instead.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"path": map[string]interface{}{
+							"type":        "string",
+							"description": "File path relative to the working directory",
+						},
+						"content": map[string]interface{}{
+							"type":        "string",
+							"description": "Full new file content",
+						},
+						"overwrite": map[string]interface{}{
+							"type":        "boolean",
+							"description": "Allow replacing an existing file (default false)",
+						},
+					},
+					"required": []string{"path", "content"},
+				},
+			},
+		},
+		map[string]interface{}{
+			"type": "function",
+			"function": map[string]interface{}{
+				"name":        "edit_file",
+				"description": "Replace an exact substring in a file. old_string must match exactly once unless replace_all=true; a 0-match or ambiguous match is a hard error. Returns a diff of what changed. Anchor on exact current text, including indentation.",
+				"parameters": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"path": map[string]interface{}{
+							"type":        "string",
+							"description": "File path relative to the working directory",
+						},
+						"old_string": map[string]interface{}{
+							"type":        "string",
+							"description": "Exact existing text to replace (must be unique unless replace_all=true)",
+						},
+						"new_string": map[string]interface{}{
+							"type":        "string",
+							"description": "Replacement text",
+						},
+						"replace_all": map[string]interface{}{
+							"type":        "boolean",
+							"description": "Replace every occurrence instead of requiring a unique match (default false)",
+						},
+						"dry_run": map[string]interface{}{
+							"type":        "boolean",
+							"description": "Preview the change without writing (default false)",
+						},
+					},
+					"required": []string{"path", "old_string", "new_string"},
+				},
+			},
+		},
+	}
 
 	return schemas
 }
