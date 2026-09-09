@@ -928,13 +928,13 @@ func GetToolSchemas() []interface{} {
 			"type": "function",
 			"function": map[string]interface{}{
 				"name":        "read_file",
-				"description": "Read a UTF-8 text file, returning numbered lines. Use offset/limit to window large files instead of loading them whole. Paths are relative to the agent's working directory and cannot escape it.",
+				"description": "Read a UTF-8 text file from the sandbox workspace, returning numbered lines. Use offset/limit to window large files instead of loading them whole. Paths are relative to the sandbox workspace (mounted at /workspace in the container) and cannot escape it.",
 				"parameters": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"path": map[string]interface{}{
 							"type":        "string",
-							"description": "File path relative to the working directory",
+							"description": "File path relative to the sandbox workspace",
 						},
 						"offset": map[string]interface{}{
 							"type":        "integer",
@@ -953,13 +953,13 @@ func GetToolSchemas() []interface{} {
 			"type": "function",
 			"function": map[string]interface{}{
 				"name":        "write_file",
-				"description": "Create a new file, or replace an existing one when overwrite=true. Refuses to clobber an existing file by default. For targeted changes to an existing file use edit_file instead.",
+				"description": "Create a new file in the sandbox workspace, or replace an existing one when overwrite=true. Refuses to clobber an existing file by default. For targeted changes to an existing file use edit_file instead.",
 				"parameters": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"path": map[string]interface{}{
 							"type":        "string",
-							"description": "File path relative to the working directory",
+							"description": "File path relative to the sandbox workspace",
 						},
 						"content": map[string]interface{}{
 							"type":        "string",
@@ -978,13 +978,13 @@ func GetToolSchemas() []interface{} {
 			"type": "function",
 			"function": map[string]interface{}{
 				"name":        "edit_file",
-				"description": "Replace an exact substring in a file. old_string must match exactly once unless replace_all=true; a 0-match or ambiguous match is a hard error. Returns a diff of what changed. Anchor on exact current text, including indentation.",
+				"description": "Replace an exact substring in a file in the sandbox workspace. old_string must match exactly once unless replace_all=true; a 0-match or ambiguous match is a hard error. Returns a diff of what changed. Anchor on exact current text, including indentation.",
 				"parameters": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"path": map[string]interface{}{
 							"type":        "string",
-							"description": "File path relative to the working directory",
+							"description": "File path relative to the sandbox workspace",
 						},
 						"old_string": map[string]interface{}{
 							"type":        "string",
