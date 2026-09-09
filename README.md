@@ -72,6 +72,17 @@ if __name__ == "__main__":
 schema). `sandbox/addons/*.py` wins over `addons/*.py` on name collisions, so users can
 override a shipped tool locally. See `addons/hello_world.py` for a working example.
 
+## File tools
+Three builtin tools give the agent structured file access instead of shell heredocs:
+`read_file` (numbered, windowed lines), `write_file` (refuses to clobber unless
+`overwrite=true`), and `edit_file` (exact-substring anchor, unique unless
+`replace_all=true`, returns a diff, supports `dry_run`).
+
+They are **confined to `sandbox/`**, the same directory bind-mounted into the container
+at `/workspace`. Relative paths resolve against that root, `/workspace/foo` is accepted
+as a convenience, and absolute paths, `..` escapes and symlinks pointing outside are
+rejected. The agent cannot reach the host repo, `.env` or its own source tree with them.
+
 ## Tests
 ```bash
 go vet ./...

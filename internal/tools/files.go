@@ -13,8 +13,12 @@ import (
 // File tools: read_file / write_file / edit_file.
 //
 // Design notes (deliberately conservative):
-//   - Paths are resolved relative to the process working directory and must stay
-//     inside it; absolute paths and ".." escapes are rejected.
+//   - The tools are confined to the sandbox workspace: ./sandbox, which is
+//     bind-mounted into the Docker sandbox at /workspace. The agent can read and
+//     write there and nowhere else - not its own source tree, not the host home
+//     directory. Relative paths are resolved against that root; absolute paths
+//     and ".." escapes are rejected. The container-side spelling /workspace/foo
+//     is accepted as a convenience and mapped back into the root.
 //   - read_file is windowed (offset/limit) and line-numbered, so the model never
 //     has to pull a whole large file into context.
 //   - write_file never clobbers an existing file unless overwrite=true.
@@ -30,35 +34,62 @@ const (
 	maxDiffLines     = 60
 )
 
-// resolvePath validates a caller-supplied path and returns the absolute path.
-func resolvePath(p string) (string, error) {
-	if strings.TrimSpace(p) == "" {
-		return "", fmt.Errorf("path is required")
-	}
-	base, err := os.Getwd()
+// sandboxRootName is the agent-writable workspace directory, relative to the
+// process working directory. It is the same directory that docker_shell bind-
+// mounts into the container at /workspace.
+const sandboxRootName = "sandbox"
+
+// sandboxRoot returns the absolute path of the sandbox workspace, creating it
+// if necessary.
+func sandboxRoot() (string, error) {
+	cwd, err := os.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("cannot determine working directory: %v", err)
 	}
-	abs := p
-	if !filepath.IsAbs(abs) {
-		abs = filepath.Join(base, abs)
+	root := filepath.Join(cwd, sandboxRootName)
+	if err := os.MkdirAll(root, 0755); err != nil {
+		return "", fmt.Errorf("cannot create sandbox workspace %s: %v", root, err)
 	}
-	abs = filepath.Clean(abs)
+	return root, nil
+}
 
-	rel, err := filepath.Rel(base, abs)
+// resolvePath validates a caller-supplied path and returns its absolute location
+// inside the sandbox workspace.
+func resolvePath(p string) (string, error) {
+	raw := strings.TrimSpace(p)
+	if raw == "" {
+		return "", fmt.Errorf("path is required")
+	}
+
+	root, err := sandboxRoot()
+	if err != nil {
+		return "", err
+	}
+
+	// Convenience: accept the container-side spelling (/workspace/foo) and map
+	// it back into the root. Anything else absolute is refused.
+	if strings.HasPrefix(raw, "/workspace/") {
+		raw = strings.TrimPrefix(raw, "/workspace/")
+	} else if filepath.IsAbs(raw) || strings.HasPrefix(raw, "/") || (len(raw) > 1 && raw[1] == ':') {
+		return "", fmt.Errorf("path %q is absolute; paths must be relative to the sandbox workspace (%s/, mounted at /workspace in the container)", p, sandboxRootName)
+	}
+
+	abs := filepath.Clean(filepath.Join(root, raw))
+
+	rel, err := filepath.Rel(root, abs)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("path %q is outside the working directory (%s)", p, base)
+		return "", fmt.Errorf("path %q is outside the sandbox workspace; the agent can only read and write %s/", p, sandboxRootName)
 	}
 
 	// If the path (or its parent, for new files) exists, make sure symlinks
-	// cannot point outside the working directory.
+	// cannot point outside the workspace.
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		if r, err := filepath.Rel(base, resolved); err != nil || r == ".." || strings.HasPrefix(r, ".."+string(os.PathSeparator)) {
-			return "", fmt.Errorf("path %q resolves outside the working directory", p)
+		if r, err := filepath.Rel(root, resolved); err != nil || r == ".." || strings.HasPrefix(r, ".."+string(os.PathSeparator)) {
+			return "", fmt.Errorf("path %q resolves outside the sandbox workspace", p)
 		}
 	} else if resolvedDir, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
-		if r, err := filepath.Rel(base, resolvedDir); err != nil || r == ".." || strings.HasPrefix(r, ".."+string(os.PathSeparator)) {
-			return "", fmt.Errorf("path %q resolves outside the working directory", p)
+		if r, err := filepath.Rel(root, resolvedDir); err != nil || r == ".." || strings.HasPrefix(r, ".."+string(os.PathSeparator)) {
+			return "", fmt.Errorf("path %q resolves outside the sandbox workspace", p)
 		}
 	}
 	return abs, nil
