@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"X01/internal/core"
@@ -17,6 +18,47 @@ import (
 	"X01/internal/server"
 )
 
+// stdinLines is the single delivery point for terminal input. One goroutine owns
+// os.Stdin for the lifetime of the process (see startStdinPump); AskUser only
+// reads from this channel. Previously every AskUser call spawned its own scanner
+// goroutine, which leaked on the web/timeout paths and let stale readers steal or
+// split lines typed by the human.
+var (
+	stdinMu       sync.Mutex
+	stdinLines    chan string
+	stdinPumpOnce sync.Once
+)
+
+// startStdinPump starts the one and only stdin reader for the process. The
+// channel is buffered(1) so a line typed just before AskUser is called is still
+// delivered; the pump goroutine blocks harmlessly while nobody is reading.
+func startStdinPump() {
+	stdinPumpOnce.Do(func() {
+		lines := make(chan string, 1)
+
+		stdinMu.Lock()
+		stdinLines = lines
+		stdinMu.Unlock()
+
+		go func(ch chan string) {
+			scanner := bufio.NewScanner(os.Stdin)
+			// Allow long pasted lines instead of silently failing at 64 KiB.
+			scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+			for scanner.Scan() {
+				ch <- scanner.Text()
+			}
+			close(ch)
+		}(lines)
+	})
+}
+
+// stdinChannel returns the channel owned by the stdin pump, if it has started.
+func stdinChannel() chan string {
+	stdinMu.Lock()
+	defer stdinMu.Unlock()
+	return stdinLines
+}
+
 func AskUser(ctx context.Context, args map[string]interface{}) string {
 	question, _ := args["question"].(string)
 	fmt.Printf("\n========================================\n")
@@ -24,39 +66,36 @@ func AskUser(ctx context.Context, args map[string]interface{}) string {
 	fmt.Printf("========================================\n")
 	fmt.Print("You: ")
 
-	// Use a channel to receive input so we can select on context cancellation
-	inputChan := make(chan string)
-	errorChan := make(chan error)
-
-	go func() {
-		scanner := bufio.NewScanner(os.Stdin)
-		if scanner.Scan() {
-			inputChan <- scanner.Text()
-		} else if err := scanner.Err(); err != nil {
-			errorChan <- err
-		} else {
-			inputChan <- "No response"
-		}
-	}()
+	startStdinPump()
 
 	// Request web reply
 	server.SetActivity("Awaiting Authorization (Human Proxy Needed)")
 	webReplyChan := server.RequestReply(question)
 	defer server.ClearRequest()
 
-	select {
-	case result := <-inputChan:
-		server.SetActivity("Engagement Received (Terminal)")
-		return result
-	case result := <-webReplyChan:
-		server.SetActivity("Engagement Received (Web)")
-		logger.LogSuccess("Received web reply: %s", result)
-		return result
-	case err := <-errorChan:
-		return fmt.Sprintf("Error reading input: %v", err)
-	case <-ctx.Done():
-		fmt.Printf("\n[Timeout/Cancelled - aborting wait for response]\n")
-		return "Timed out waiting for user response"
+	stdinCh := stdinChannel()
+	for {
+		select {
+		case result, ok := <-stdinCh:
+			if !ok {
+				// stdin is exhausted or unavailable (e.g. no TTY): stop waiting on
+				// the terminal and keep waiting for a web reply or the deadline.
+				stdinCh = nil
+				continue
+			}
+			server.SetActivity("Engagement Received (Terminal)")
+			return result
+		case result, ok := <-webReplyChan:
+			if !ok {
+				return "Timed out waiting for user response"
+			}
+			server.SetActivity("Engagement Received (Web)")
+			logger.LogSuccess("Received web reply: %s", result)
+			return result
+		case <-ctx.Done():
+			fmt.Printf("\n[Timeout/Cancelled - aborting wait for response]\n")
+			return "Timed out waiting for user response"
+		}
 	}
 }
 

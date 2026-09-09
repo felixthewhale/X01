@@ -19,13 +19,26 @@ import (
 var webAssets embed.FS
 
 var (
-	replyChan       = make(chan string)
 	activeRequest   = false
 	activePrompt    = ""
 	currentActivity = "Initializing..."
 	WakeupChan      = make(chan bool, 1)
 	mu              sync.Mutex
+
+	// currentReply is the delivery channel for the ask_user call that is
+	// currently waiting for human input. It is nil when no request is active.
+	// Each request gets its own buffered channel so a late or duplicate HTTP
+	// reply can never block a handler or leak into the next request.
+	currentReply *replyDelivery
 )
+
+// replyDelivery wraps the per-request reply channel. The channel is buffered(1)
+// and closed by ClearRequest, which makes delivery non-blocking and guarantees
+// that a reply arriving after the request ended is discarded instead of blocking.
+type replyDelivery struct {
+	ch        chan string
+	delivered bool
+}
 
 // Start initializes and runs the background HTTP server
 func Start(port int) {
@@ -70,28 +83,33 @@ func SetActivity(activity string) {
 	mu.Unlock()
 }
 
-// RequestReply sets the server into "blocking" mode for AskUser
+// RequestReply sets the server into "blocking" mode for AskUser and returns the
+// channel on which the human reply will be delivered. A fresh channel is created
+// for every request, so a reply that arrives after the previous request finished
+// can never be observed by the next one.
 func RequestReply(prompt string) chan string {
 	mu.Lock()
+	defer mu.Unlock()
+
 	activeRequest = true
 	activePrompt = prompt
-	mu.Unlock()
-
-	// Clear any stale replies
-	select {
-	case <-replyChan:
-	default:
-	}
-
-	return replyChan
+	currentReply = &replyDelivery{ch: make(chan string, 1)}
+	return currentReply.ch
 }
 
-// ClearRequest cancels any active blocking request
+// ClearRequest cancels any active blocking request and closes its reply channel.
+// Closing (rather than just dropping the reference) releases any HTTP handler
+// that is about to deliver a reply and guarantees the next request starts clean.
 func ClearRequest() {
 	mu.Lock()
+	defer mu.Unlock()
+
 	activeRequest = false
 	activePrompt = ""
-	mu.Unlock()
+	if currentReply != nil {
+		close(currentReply.ch)
+		currentReply = nil
+	}
 }
 
 func handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -159,16 +177,31 @@ func handleReply(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mu.Lock()
-	if !activeRequest {
+	if !activeRequest || currentReply == nil {
 		mu.Unlock()
 		http.Error(w, "No active request to reply to", http.StatusBadRequest)
 		return
 	}
-	mu.Unlock()
 
-	NotifyWakeup()
-	replyChan <- data.Content
-	w.WriteHeader(http.StatusOK)
+	// Exactly one reply per request: reject a duplicate before it can block or
+	// be mistaken for the answer to the next ask_user call.
+	if currentReply.delivered {
+		mu.Unlock()
+		http.Error(w, "A reply was already delivered for this request", http.StatusConflict)
+		return
+	}
+	currentReply.delivered = true
+
+	// The channel is buffered(1), so this send never blocks a handler goroutine.
+	select {
+	case currentReply.ch <- data.Content:
+		mu.Unlock()
+		NotifyWakeup()
+		w.WriteHeader(http.StatusOK)
+	default:
+		mu.Unlock()
+		http.Error(w, "A reply is already pending for this request", http.StatusConflict)
+	}
 }
 
 func handleStatus(w http.ResponseWriter, r *http.Request) {
