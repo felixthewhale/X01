@@ -686,7 +686,7 @@ func GetToolSchemas() []interface{} {
 						},
 						"timeout": map[string]interface{}{
 							"type":        "integer",
-							"description": "Optional timeout in seconds.",
+							"description": "Optional seconds to wait for a reply (30-3600). Defaults to 600.",
 						},
 					},
 					"required": []string{"question"},
