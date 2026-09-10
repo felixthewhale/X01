@@ -178,8 +178,24 @@ func DockerShell(ctx context.Context, args map[string]interface{}) string {
 	return string(out)
 }
 
+// MaxMemories is the hard cap on stored memories. GetMemories gives the model a
+// window over the most recent rows, so anything beyond this would silently fall
+// out of the prompt; Memorize refuses past the cap instead of losing facts.
+const MaxMemories = 40
+
 func Memorize(ctx context.Context, args map[string]interface{}) string {
 	content, _ := args["content"].(string)
+	if strings.TrimSpace(content) == "" {
+		return "Error: memory content is empty"
+	}
+	n, err := db.CountMemories()
+	if err != nil {
+		logger.LogError("Failed to count memories: %v", err)
+		return fmt.Sprintf("Error: could not verify memory count (%v); refusing to store to avoid exceeding the %d cap.", err, MaxMemories)
+	}
+	if n >= MaxMemories {
+		return fmt.Sprintf("Error: memory limit reached (%d/%d). No more memories can be stored. Reconsolidate first: merge related memories into one and delete the originals with forget_memory, then store the merged version.", n, MaxMemories)
+	}
 	id, err := db.AddMemory(content)
 	if err != nil {
 		logger.LogError("Failed to add memory: %v", err)
@@ -736,7 +752,7 @@ func GetToolSchemas() []interface{} {
 			"type": "function",
 			"function": map[string]interface{}{
 				"name":        "memorize",
-				"description": "Stores a discrete fact or finding in long-term memory. Returns the ID of the memory.",
+				"description": "Stores a discrete fact or finding in long-term memory. Returns the ID of the memory. Memory is capped (currently 40 entries): when the limit is reached the call fails and you must reconsolidate first - merge related memories into one and delete the originals with forget_memory.",
 				"parameters": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{

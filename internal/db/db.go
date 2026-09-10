@@ -328,6 +328,12 @@ func FetchAndClearPending() ([]string, error) {
 	return messages, err
 }
 
+func CountMemories() (int, error) {
+	var n int
+	err := DB.QueryRow("SELECT COUNT(*) FROM memories").Scan(&n)
+	return n, err
+}
+
 func AddMemory(content string) (int64, error) {
 	query := "INSERT INTO memories (content) VALUES (?)"
 	res, err := DB.Exec(query, content)
