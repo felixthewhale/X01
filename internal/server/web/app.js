@@ -18,11 +18,12 @@ async function updateStatus() {
         if (data.active_request) {
             isWaiting = true;
             promptContainer.style.display = 'block';
-            promptText.innerText = data.prompt;
+            promptText.innerText = data.prompt || '(question unavailable)';
             sendBtn.innerText = "AUTHORIZE REPLY";
         } else {
             isWaiting = false;
             promptContainer.style.display = 'none';
+            promptText.innerText = '';
             sendBtn.innerText = "TRANSMIT PACKET";
         }
 
@@ -53,7 +54,8 @@ function renderHistory(history) {
         div.innerHTML = 
             '<div class="msg-role">' + m.role + toolName + '</div>' +
             '<div class="msg-content">' + escapeHtml(m.content) + '</div>' +
-            (m.reasoning ? '<div class="reasoning">THOUGHT: ' + escapeHtml(m.reasoning) + '</div>' : '');
+            renderToolCalls(m.tool_calls) +
+            (m.reasoning ? '<div class="reasoning">THOUGHT: ' + escapeHtml(truncate(m.reasoning, REASONING_MAX)) + '</div>' : '');
         historyContainer.appendChild(div);
     });
 
@@ -70,6 +72,43 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.innerText = text;
     return div.innerHTML;
+}
+
+// Assistant messages that call a tool carry no text content (the invocation lives
+// in tool_calls), so they used to render as an empty bubble with an unexplained
+// tool result below. Render the calls explicitly: name + pretty-printed arguments.
+function renderToolCalls(toolCalls) {
+    if (!toolCalls || !toolCalls.length) return '';
+
+    return toolCalls.map(tc => {
+        const fn = (tc && tc.function) || {};
+        const name = fn.name || '(unknown tool)';
+
+        let args = fn.arguments || '';
+        try {
+            args = JSON.stringify(JSON.parse(args), null, 2);
+        } catch (e) {
+            // Malformed/partial JSON: show it raw rather than hide it.
+        }
+
+        const heading = tc.type === 'function' || !tc.type
+            ? 'CALL &rarr; ' + escapeHtml(name)
+            : 'CALL &rarr; ' + escapeHtml(tc.type) + ':' + escapeHtml(name);
+
+        return '<div class="tool-call">' +
+               '<div class="tc-name">' + heading + '</div>' +
+               '<pre class="tc-args">' + escapeHtml(truncate(args, ARGS_MAX)) + '</pre>' +
+               '</div>';
+    }).join('');
+}
+
+const REASONING_MAX = 2000;
+const ARGS_MAX = 4000;
+
+function truncate(text, max) {
+    if (!text) return "";
+    if (text.length <= max) return text;
+    return text.slice(0, max) + "\n...[truncated " + (text.length - max) + " chars]";
 }
 
 sendBtn.onclick = async () => {
