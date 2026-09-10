@@ -120,7 +120,7 @@ func runHeartbeat() error {
 		json.Unmarshal([]byte(configStr), &config)
 	}
 
-	memories, _ := db.GetMemories(20)
+	memories, _ := db.GetMemories(tools.MaxMemories)
 
 	server.SetActivity("Synthesizing context & history...")
 	sysMsg := prompt.RenderPrompt(stateText, memories, 3.0)
