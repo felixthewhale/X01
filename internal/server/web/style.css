@@ -176,6 +176,32 @@ h1 {
 
 .msg-content { white-space: pre-wrap; word-break: break-word; }
 
+/* Assistant tool calls: the invocation itself (name + arguments), which has no
+   text content of its own and used to render as an empty bubble. */
+.tool-call {
+    margin-top: 10px;
+    padding-left: 10px;
+    border-left: 2px solid var(--tool);
+}
+
+.tc-name {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    font-weight: 700;
+    color: var(--tool);
+    opacity: 0.9;
+}
+
+.tc-args {
+    margin: 4px 0 0 0;
+    font-size: 0.8rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
 .reasoning {
     font-style: italic;
     font-size: 0.85rem;
